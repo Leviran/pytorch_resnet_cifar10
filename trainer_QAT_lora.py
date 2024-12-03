@@ -14,11 +14,18 @@ import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import resnet
+from torch.quantization import get_default_qconfig, prepare_qat, convert
 import wandb
+from quantization_utils_classengine.iresnet import quantize_model
+
+"""
+运行指令：
+pytorch_resnet_cifar10# python -u trainer_QAT.py --arch=resnet20 --save-dir=./log/save_resnet20_qat |& tee -a ./log/log_resnet20_qat
+"""
 
 os.environ["WANDB_API_KEY"] = "1df731212a55e7e0f9e8e6c3a31983590d3c19ca"
-wandb.init(project="ResNet20-QAT-CIFAR10",name="default_res20_fp32_cifar10")
-
+wandb.init(project="ResNet20-QAT-CIFAR10",name="default_res20_qat_cifar10_lora")
+# TODO:
 
 model_names = sorted(name for name in resnet.__dict__
     if name.islower() and not name.startswith("__")
@@ -28,7 +35,7 @@ model_names = sorted(name for name in resnet.__dict__
 print(model_names)
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet20',
                     choices=model_names,
                     help='model architecture: ' + ' | '.join(model_names) +
                     ' (default: resnet32)')
@@ -70,7 +77,7 @@ args = parser.parse_args()
 
 # 日志
 current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-log_filename = os.path.join(args.log_dir, f'{args.arch}_fp32',f'log_{current_time}.log')
+log_filename = os.path.join(args.log_dir, f'{args.arch}_qat_lora',f'log_{current_time}.log')
 logging.basicConfig(format='%(asctime)s - %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S', filename=log_filename)
 logging.getLogger().setLevel(logging.INFO)
@@ -78,6 +85,11 @@ logging.getLogger().addHandler(logging.StreamHandler())
 
 logging.info(args)
 
+def prepare_for_qat(model):
+    # 在模型的输入输出处插入量化和反量化节点
+    model.qconfig = get_default_qconfig('fbgemm')  # 设置量化配置
+    torch.quantization.prepare_qat(model, inplace=True)  # 准备QAT模型
+    return model
 
 def main():
     global args, best_prec1
@@ -89,6 +101,10 @@ def main():
 
     model = torch.nn.DataParallel(resnet.__dict__[args.arch]())
     model.cuda()
+
+    # 进入量化感知训练模式
+    model = prepare_for_qat(model)
+    # model = quantize_model(model, weight_bit=8, act_bit=8, full_precision_flag=False)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -172,10 +188,15 @@ def main():
                 'best_prec1': best_prec1,
             }, is_best, filename=os.path.join(args.save_dir, 'checkpoint.th'))
 
+        epoch_model_name = f"epoch_{epoch}_prec{prec1:.3f}_{time.strftime('%Y%m%d_%H%M%S')}_{model_size(model)}.th"
         save_checkpoint({
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
-        }, is_best, filename=os.path.join(args.save_dir, 'model.th'))
+        }, is_best, filename=os.path.join(args.save_dir, epoch_model_name))
+
+    # 训练结束后，将模型转换为量化模型
+    model = convert(model, inplace=True)
+    torch.save(model.state_dict(), os.path.join(args.save_dir, 'quantized_model.pth'))
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
@@ -231,6 +252,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                       epoch, i, len(train_loader), batch_time=batch_time,
                       data_time=data_time, loss=losses, top1=top1))
     wandb.log({'train_accuracy': top1.avg, 'epoch': epoch})
+
 
 def validate(val_loader, model, criterion):
     """
@@ -321,6 +343,11 @@ def accuracy(output, target, topk=(1,)):
         correct_k = correct[:k].view(-1).float().sum(0)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
+
+
+def model_size(model):
+    """返回模型的大小（以MB为单位）"""
+    return sum(p.numel() for p in model.parameters()) * 4 / 1024 / 1024  # 4字节 per float32
 
 
 if __name__ == '__main__':

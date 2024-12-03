@@ -1,7 +1,9 @@
 import argparse
+import logging
 import os
 import shutil
 import time
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -13,7 +15,16 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import resnet
 from torch.quantization import get_default_qconfig, prepare_qat, convert
+import wandb
+from quantization_utils_classengine.iresnet import quantize_model
 
+"""
+运行指令：
+pytorch_resnet_cifar10# python -u trainer_QAT.py --arch=resnet20 --save-dir=./log/save_resnet20_qat |& tee -a ./log/log_resnet20_qat
+"""
+
+os.environ["WANDB_API_KEY"] = "1df731212a55e7e0f9e8e6c3a31983590d3c19ca"
+wandb.init(project="ResNet20-QAT-CIFAR10",name="default_res20_qat_cifar10_torchquant_fbgemm")
 
 model_names = sorted(name for name in resnet.__dict__
     if name.islower() and not name.startswith("__")
@@ -23,13 +34,13 @@ model_names = sorted(name for name in resnet.__dict__
 print(model_names)
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet20',
                     choices=model_names,
                     help='model architecture: ' + ' | '.join(model_names) +
                     ' (default: resnet32)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=200, type=int, metavar='N',
+parser.add_argument('--epochs', default=160, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -54,10 +65,24 @@ parser.add_argument('--half', dest='half', action='store_true',
 parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
                     default='save_temp', type=str)
+parser.add_argument('--log-dir', dest='save_dir',
+                    help='The directory used to save the trained logs',
+                    default='log_temp', type=str)
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
 best_prec1 = 0
+args = parser.parse_args()
+
+# 日志，标准记录格式应该是： /logs/训练方式/log_时间.log，log_dir是/log
+current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+log_filename = os.path.join(args.log_dir, f'{args.arch}_qat',f'log_{current_time}.log')
+logging.basicConfig(format='%(asctime)s - %(message)s',
+                    datefmt='%d-%b-%y %H:%M:%S', filename=log_filename)
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().addHandler(logging.StreamHandler())
+
+logging.info(args)
 
 def prepare_for_qat(model):
     # 在模型的输入输出处插入量化和反量化节点
@@ -67,7 +92,6 @@ def prepare_for_qat(model):
 
 def main():
     global args, best_prec1
-    args = parser.parse_args()
 
 
     # Check the save_dir exists or not
@@ -79,6 +103,7 @@ def main():
 
     # 进入量化感知训练模式
     model = prepare_for_qat(model)
+    # model = quantize_model(model, weight_bit=8, act_bit=8, full_precision_flag=False)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -162,14 +187,16 @@ def main():
                 'best_prec1': best_prec1,
             }, is_best, filename=os.path.join(args.save_dir, 'checkpoint.th'))
 
+        epoch_model_name = f"epoch_{epoch}_prec{prec1:.3f}_{time.strftime('%Y%m%d_%H%M%S')}_{model_size(model)}.th"
         save_checkpoint({
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
-        }, is_best, filename=os.path.join(args.save_dir, 'model.th'))
+        }, is_best, filename=os.path.join(args.save_dir, epoch_model_name))
 
     # 训练结束后，将模型转换为量化模型
     model = convert(model, inplace=True)
     torch.save(model.state_dict(), os.path.join(args.save_dir, 'quantized_model.pth'))
+
 
 def train(train_loader, model, criterion, optimizer, epoch):
     """
@@ -223,6 +250,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
                       epoch, i, len(train_loader), batch_time=batch_time,
                       data_time=data_time, loss=losses, top1=top1))
+    wandb.log({'train_accuracy': top1.avg, 'epoch': epoch})
 
 
 def validate(val_loader, model, criterion):
@@ -273,6 +301,7 @@ def validate(val_loader, model, criterion):
     print(' * Prec@1 {top1.avg:.3f}'
           .format(top1=top1))
 
+    wandb.log({'val_accuracy': top1.avg})  # 记录验证集的准确率
     return top1.avg
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
@@ -313,6 +342,11 @@ def accuracy(output, target, topk=(1,)):
         correct_k = correct[:k].view(-1).float().sum(0)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
+
+
+def model_size(model):
+    """返回模型的大小（以MB为单位）"""
+    return sum(p.numel() for p in model.parameters()) * 4 / 1024 / 1024  # 4字节 per float32
 
 
 if __name__ == '__main__':
