@@ -64,10 +64,10 @@ parser.add_argument('--half', dest='half', action='store_true',
                     help='use half-precision(16-bit) ')
 parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
-                    default='save_temp', type=str)
-parser.add_argument('--log-dir', dest='save_dir',
+                    default='saved_models', type=str)
+parser.add_argument('--log-dir',
                     help='The directory used to save the trained logs',
-                    default='log_temp', type=str)
+                    default='logs', type=str)
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
@@ -95,8 +95,9 @@ def main():
 
 
     # Check the save_dir exists or not
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
+    save_dir = os.path.join(args.save_dir, f'{args.arch}_qat', f'{current_time}')
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     model = torch.nn.DataParallel(resnet.__dict__[args.arch]())
     model.cuda()
@@ -185,17 +186,17 @@ def main():
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-            }, is_best, filename=os.path.join(args.save_dir, 'checkpoint.th'))
+            }, is_best, filename=os.path.join(save_dir, 'checkpoint.th'))
 
         epoch_model_name = f"epoch_{epoch}_prec{prec1:.3f}_{time.strftime('%Y%m%d_%H%M%S')}_{model_size(model)}.th"
         save_checkpoint({
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
-        }, is_best, filename=os.path.join(args.save_dir, epoch_model_name))
+        }, is_best, filename=os.path.join(save_dir, epoch_model_name))
 
     # 训练结束后，将模型转换为量化模型
     model = convert(model, inplace=True)
-    torch.save(model.state_dict(), os.path.join(args.save_dir, 'quantized_model.pth'))
+    torch.save(model.state_dict(), os.path.join(save_dir, 'quantized_model.pth'))
 
 
 def train(train_loader, model, criterion, optimizer, epoch):

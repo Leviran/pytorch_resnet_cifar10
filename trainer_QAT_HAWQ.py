@@ -29,7 +29,7 @@ pytorch_resnet_cifar10# python -u trainer_QAT.py --arch=resnet20 --save-dir=./lo
 #  所有代码，在训练最开始先输出所有信息，参考HAWQ的代码
 
 os.environ["WANDB_API_KEY"] = "1df731212a55e7e0f9e8e6c3a31983590d3c19ca"
-wandb.init(project="ResNet20-QAT-CIFAR10",name="default_res20_qat_cifar10_torchquant_fbgemm")
+wandb.init(project="ResNet20-QAT-CIFAR10",name="default_res20_qat_cifar10_hawq")
 
 model_names = sorted(name for name in resnet.__dict__
     if name.islower() and not name.startswith("__")
@@ -69,10 +69,10 @@ parser.add_argument('--half', dest='half', action='store_true',
                     help='use half-precision(16-bit) ')
 parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
-                    default='save_temp', type=str)
-parser.add_argument('--log-dir', dest='save_dir',
+                    default='saved_models', type=str)
+parser.add_argument('--log-dir',
                     help='The directory used to save the trained logs',
-                    default='log_temp', type=str)
+                    default='logs', type=str)
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
@@ -100,8 +100,9 @@ def main():
 
 
     # Check the save_dir exists or not
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
+    save_dir = os.path.join(args.save_dir, f'{args.arch}_qat_hawq', f'{current_time}')
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     model = torch.nn.DataParallel(resnet.__dict__[args.arch]())
     model.cuda()
@@ -190,17 +191,17 @@ def main():
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-            }, is_best, filename=os.path.join(args.save_dir, 'checkpoint.th'))
+            }, is_best, filename=os.path.join(save_dir, 'checkpoint.th'))
 
         epoch_model_name = f"epoch_{epoch}_prec{prec1:.3f}_{time.strftime('%Y%m%d_%H%M%S')}_{model_size(model)}.th"
         save_checkpoint({
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
-        }, is_best, filename=os.path.join(args.save_dir, epoch_model_name))
+        }, is_best, filename=os.path.join(save_dir, epoch_model_name))
 
     # 训练结束后，将模型转换为量化模型
     model = convert(model, inplace=True)
-    torch.save(model.state_dict(), os.path.join(args.save_dir, 'quantized_model.pth'))
+    torch.save(model.state_dict(), os.path.join(save_dir, 'quantized_model.pth'))
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
