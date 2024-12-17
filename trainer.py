@@ -13,11 +13,8 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-import resnet
+import resnet_hawq as resnet
 import wandb
-
-os.environ["WANDB_API_KEY"] = "1df731212a55e7e0f9e8e6c3a31983590d3c19ca"
-wandb.init(project="ResNet20-QAT-CIFAR10",name="default_res20_fp32_cifar10")
 
 
 model_names = sorted(name for name in resnet.__dict__
@@ -28,13 +25,13 @@ model_names = sorted(name for name in resnet.__dict__
 print(model_names)
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' + ' | '.join(model_names) +
                     ' (default: resnet32)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=160, type=int, metavar='N',
+parser.add_argument('--epochs', default=200, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -68,9 +65,14 @@ parser.add_argument('--save-every', dest='save_every',
 best_prec1 = 0
 args = parser.parse_args()
 
+os.environ["WANDB_API_KEY"] = "1df731212a55e7e0f9e8e6c3a31983590d3c19ca"
+wandb.init(project="ResNet20-QAT-CIFAR10",name=f"default_{args.arch}_fp32_cifar10_stage4")
+
 # 日志
 current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 log_filename = os.path.join(args.log_dir, f'{args.arch}_fp32',f'log_{current_time}.log')
+log_dir = os.path.dirname(log_filename)
+os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(format='%(asctime)s - %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S', filename=log_filename)
 logging.getLogger().setLevel(logging.INFO)

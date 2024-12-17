@@ -221,6 +221,77 @@ def quantize_model(model, weight_bit=None, act_bit=None, full_precision_flag=Fal
         return q_model
 
 
+"""
+这个函数可以指定不同层使用不同的量化位宽
+"""
+def quantize_model_mix(model, bit_config, full_precision_flag=False):
+    """
+    Recursively quantize a pretrained single-precision model to int8 quantized model.
+    model: pretrained single-precision model.
+    bit_config: dict containing quantization config for each layer.
+    """
+
+    # Helper function to get bit width from config based on the layer name.
+    def get_bit_width(layer_name, bit_config, default_bit=8):
+        """
+        Get the quantization bit-width for a given layer from the bit_config.
+        """
+        if layer_name in bit_config:
+            return bit_config[layer_name]
+        return default_bit  # Default to 8 if not found in config.
+
+    # If the model is a convolutional layer
+    if isinstance(model, nn.Conv2d):
+        # Get quantization bit-width for weight and activation for Conv2d layers
+        layer_name_weight = f'quant_convbn{model.weight.shape[0]}'  # e.g., 'quant_convbn1'
+        weight_bit = get_bit_width(layer_name_weight, bit_config, 8)
+
+        layer_name_act = f'quant_act{model.weight.shape[0]}'  # e.g., 'quant_act1'
+        act_bit = get_bit_width(layer_name_act, bit_config, 8)
+
+        quant_mod = Quant_Conv2d(weight_bit=weight_bit, full_precision_flag=full_precision_flag)
+        quant_mod.set_param(model)
+        return quant_mod
+
+    # If the model is a fully connected layer (fc)
+    elif isinstance(model, nn.Linear):
+        layer_name = 'quant_output'  # For fully connected layers, we'll map to 'quant_output'
+        weight_bit = get_bit_width(layer_name, bit_config, 8)
+        act_bit = get_bit_width(f'{layer_name}_act', bit_config, 8)
+
+        quant_mod = Quant_Linear(weight_bit=weight_bit, full_precision_flag=full_precision_flag)
+        quant_mod.set_param(model)
+        return quant_mod
+
+    # If the model is an activation function (ReLU, PReLU, etc.)
+    elif isinstance(model, (nn.ReLU, nn.PReLU)):
+        layer_name = 'quant_act'  # Map to 'quant_act' for activations
+        act_bit = get_bit_width(layer_name, bit_config, 8)
+        return nn.Sequential(model, QuantAct(activation_bit=act_bit, full_precision_flag=full_precision_flag))
+
+    # For special activation layers such as PreLU
+    elif isinstance(model, nn.PReLU):
+        layer_name = 'quant_act'  # Map 'quant_act' to PReLU
+        act_bit = get_bit_width(layer_name, bit_config, 8)
+        return nn.Sequential(model, QuantActPreLu(activation_bit=act_bit, full_precision_flag=full_precision_flag))
+
+    # Recursively apply quantization to layers in nn.Sequential (e.g., blocks, networks)
+    elif isinstance(model, nn.Sequential):
+        mods = OrderedDict()
+        for n, m in model.named_children():
+            mods[n] = quantize_model_mix(m, bit_config, full_precision_flag)
+        return nn.Sequential(mods)
+
+    # Handle other layers (e.g., IBasicBlock, etc.)
+    else:
+        q_model = copy.deepcopy(model)
+        for attr in dir(model):
+            mod = getattr(model, attr)
+            if isinstance(mod, nn.Module) and 'norm' not in attr:  # Skip normalization layers
+                setattr(q_model, attr, quantize_model_mix(mod, bit_config, full_precision_flag))
+        return q_model
+
+
 def freeze_model(model):
     """
     freeze the activation range

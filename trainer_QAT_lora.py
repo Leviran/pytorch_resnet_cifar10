@@ -41,7 +41,7 @@ parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet20',
                     ' (default: resnet32)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=160, type=int, metavar='N',
+parser.add_argument('--epochs', default=200, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -72,12 +72,17 @@ parser.add_argument('--log-dir',
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
+parser.add_argument('--w', type=int, default=8, help='Weight quantization bitwidth')
+parser.add_argument('--a', type=int, default=8, help='Activation quantization bitwidth')
+
 best_prec1 = 0
 args = parser.parse_args()
 
 # 日志
 current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 log_filename = os.path.join(args.log_dir, f'{args.arch}_qat_lora',f'log_{current_time}.log')
+log_dir = os.path.dirname(log_filename)
+os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(format='%(asctime)s - %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S', filename=log_filename)
 logging.getLogger().setLevel(logging.INFO)
@@ -87,8 +92,10 @@ logging.info(args)
 
 def prepare_for_qat(model):
     # 在模型的输入输出处插入量化和反量化节点
-    model.qconfig = get_default_qconfig('fbgemm')  # 设置量化配置
-    torch.quantization.prepare_qat(model, inplace=True)  # 准备QAT模型
+    qconfig = get_default_qconfig('fbgemm')  # 设置量化配置
+    qconfig.weight = torch.quantization.default_weight_observer(args.w)
+    qconfig.activation = torch.quantization.default_observer(args.a)
+    model.qconfig = qconfig
     return model
 
 def main():

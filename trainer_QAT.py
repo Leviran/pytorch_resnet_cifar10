@@ -13,7 +13,7 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
-import resnet
+import resnet_hawq as resnet
 from torch.quantization import get_default_qconfig, prepare_qat, convert
 import wandb
 from quantization_utils_classengine.iresnet import quantize_model
@@ -23,24 +23,21 @@ from quantization_utils_classengine.iresnet import quantize_model
 pytorch_resnet_cifar10# python -u trainer_QAT.py --arch=resnet20 --save-dir=./log/save_resnet20_qat |& tee -a ./log/log_resnet20_qat
 """
 
-os.environ["WANDB_API_KEY"] = "1df731212a55e7e0f9e8e6c3a31983590d3c19ca"
-wandb.init(project="ResNet20-QAT-CIFAR10",name="default_res20_qat_cifar10_torchquant_fbgemm")
 
 model_names = sorted(name for name in resnet.__dict__
     if name.islower() and not name.startswith("__")
                      and name.startswith("resnet")
                      and callable(resnet.__dict__[name]))
-
 print(model_names)
 
 parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet20',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
                     choices=model_names,
                     help='model architecture: ' + ' | '.join(model_names) +
                     ' (default: resnet32)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=160, type=int, metavar='N',
+parser.add_argument('--epochs', default=200, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -71,12 +68,24 @@ parser.add_argument('--log-dir',
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
+parser.add_argument('--w', type=int, default=8, help='Weight quantization bitwidth')
+parser.add_argument('--a', type=int, default=8, help='Activation quantization bitwidth')
+
 best_prec1 = 0
 args = parser.parse_args()
+weight_bit = args.w
+act_bit = args.a
+
+
+os.environ["WANDB_API_KEY"] = "1df731212a55e7e0f9e8e6c3a31983590d3c19ca"
+wandb.init(project="ResNet20-QAT-CIFAR10",name=f"default_{args.arch}_stage4_cifar10_qat_w{weight_bit}a{act_bit}")  # default_res18_cifar10_qat_w0a0
+
 
 # 日志，标准记录格式应该是： /logs/训练方式/log_时间.log，log_dir是/log
 current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 log_filename = os.path.join(args.log_dir, f'{args.arch}_qat',f'log_{current_time}.log')
+log_dir = os.path.dirname(log_filename)
+os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(format='%(asctime)s - %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S', filename=log_filename)
 logging.getLogger().setLevel(logging.INFO)
@@ -84,15 +93,8 @@ logging.getLogger().addHandler(logging.StreamHandler())
 
 logging.info(args)
 
-def prepare_for_qat(model):
-    # 在模型的输入输出处插入量化和反量化节点
-    model.qconfig = get_default_qconfig('fbgemm')  # 设置量化配置
-    torch.quantization.prepare_qat(model, inplace=True)  # 准备QAT模型
-    return model
-
 def main():
     global args, best_prec1
-
 
     # Check the save_dir exists or not
     save_dir = os.path.join(args.save_dir, f'{args.arch}_qat', f'{current_time}')
@@ -103,9 +105,12 @@ def main():
     model.cuda()
 
     # 进入量化感知训练模式
-    model = prepare_for_qat(model)
-    # model = quantize_model(model, weight_bit=8, act_bit=8, full_precision_flag=False)
+    # model = prepare_for_qat(model, weight_bit, act_bit)
+    # model = quantize_model(model, weight_bit, act_bit, full_precision_flag=False)
 
+    # 检查resnet的代码对不对
+    from resnet import quantize_model as quantize_model_n
+    model = quantize_model_n(model, weight_bit, act_bit, full_precision_flag=False)
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -118,6 +123,8 @@ def main():
                   .format(args.evaluate, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
+    else:
+        print("=> no use checkpoint")
 
     cudnn.benchmark = True
 

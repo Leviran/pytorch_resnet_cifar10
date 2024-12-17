@@ -34,7 +34,7 @@ import torch.nn.init as init
 
 from torch.autograd import Variable
 
-__all__ = ['ResNet', 'resnet20', 'resnet32', 'resnet44', 'resnet56', 'resnet110', 'resnet1202']
+__all__ = ['ResNet', 'resnet18', 'resnet20', 'resnet32', 'resnet44', 'resnet56', 'resnet110', 'resnet1202']
 
 def _weights_init(m):
     classname = m.__class__.__name__
@@ -117,6 +117,10 @@ class ResNet(nn.Module):
         return out
 
 
+def resnet18():
+    return ResNet(BasicBlock, [2, 2, 2])
+
+
 def resnet20():
     return ResNet(BasicBlock, [3, 3, 3])
 
@@ -150,6 +154,134 @@ def test(net):
     print("Total number of params", total_params)
     print("Total layers", len(list(filter(lambda p: p.requires_grad and len(p.data.size())>1, net.parameters()))))
 
+
+import torch.nn as nn
+from collections import OrderedDict
+import copy
+from quantization_utils_classengine.quant_modules import QuantAct, Quant_Linear, Quant_Conv2d, QuantActPreLu
+
+
+def quantize_model(model, weight_bit=None, act_bit=None, full_precision_flag=False):
+    """
+    Recursively quantize a pretrained single-precision ResNet model to int8 quantized model.
+    model: pretrained single-precision model
+    weight_bit: bit width for weights (e.g., 8 for int8)
+    act_bit: bit width for activations (e.g., 8 for int8)
+    full_precision_flag: whether to use full precision for certain layers
+    """
+
+    if isinstance(model, nn.Conv2d):
+        # Quantize convolutional layers
+        quant_mod = Quant_Conv2d(weight_bit=weight_bit, full_precision_flag=full_precision_flag)
+        quant_mod.set_param(model)
+        return quant_mod
+
+    elif isinstance(model, nn.Linear):
+        # Quantize fully connected (Linear) layers
+        quant_mod = Quant_Linear(weight_bit=weight_bit, full_precision_flag=full_precision_flag)
+        quant_mod.set_param(model)
+        return quant_mod
+
+    elif isinstance(model, nn.PReLU):
+        # Quantize PReLU activation layers
+        quant_mod = QuantActPreLu(act_bit=act_bit, full_precision_flag=full_precision_flag)
+        quant_mod.set_param(model)
+        return quant_mod
+
+    elif isinstance(model, nn.ReLU) or isinstance(model, nn.ReLU6) or isinstance(model, nn.PReLU):
+        # Quantize other activations (ReLU, ReLU6, etc.)
+        return nn.Sequential(
+            model,
+            QuantAct(activation_bit=act_bit, full_precision_flag=full_precision_flag)
+        )
+
+    elif isinstance(model, nn.Sequential):
+        # Recursively quantize modules within a Sequential container
+        mods = OrderedDict()
+        for n, m in model.named_children():
+            mods[n] = quantize_model(m, weight_bit=weight_bit, act_bit=act_bit, full_precision_flag=full_precision_flag)
+        return nn.Sequential(mods)
+
+    else:
+        # Deepcopy the model and recursively quantize its sub-modules
+        q_model = copy.deepcopy(model)
+        for attr in dir(model):
+            mod = getattr(model, attr)
+            # Skip 'norm' layers (e.g., BatchNorm)
+            if isinstance(mod, nn.Module) and 'norm' not in attr:
+                setattr(q_model, attr, quantize_model(mod, weight_bit=weight_bit, act_bit=act_bit,
+                                                      full_precision_flag=full_precision_flag))
+        return q_model
+
+"""
+这个函数可以指定不同层使用不同的量化位宽
+"""
+def quantize_model_mix(model, bit_config, full_precision_flag=False):
+    """
+    Recursively quantize a pretrained single-precision model to int8 quantized model.
+    model: pretrained single-precision model.
+    bit_config: dict containing quantization config for each layer.
+    """
+
+    # Helper function to get bit width from config based on the layer name.
+    def get_bit_width(layer_name, bit_config, default_bit=8):
+        """
+        Get the quantization bit-width for a given layer from the bit_config.
+        """
+        if layer_name in bit_config:
+            return bit_config[layer_name]
+        return default_bit  # Default to 8 if not found in config.
+
+    # If the model is a convolutional layer
+    if isinstance(model, nn.Conv2d):
+        # Get quantization bit-width for weight and activation for Conv2d layers
+        layer_name_weight = f'quant_convbn{model.weight.shape[0]}'  # e.g., 'quant_convbn1'
+        weight_bit = get_bit_width(layer_name_weight, bit_config, 8)
+
+        layer_name_act = f'quant_act{model.weight.shape[0]}'  # e.g., 'quant_act1'
+        act_bit = get_bit_width(layer_name_act, bit_config, 8)
+
+        quant_mod = Quant_Conv2d(weight_bit=weight_bit, full_precision_flag=full_precision_flag)
+        quant_mod.set_param(model)
+        return quant_mod
+
+    # If the model is a fully connected layer (fc)
+    elif isinstance(model, nn.Linear):
+        layer_name = 'quant_output'  # For fully connected layers, we'll map to 'quant_output'
+        weight_bit = get_bit_width(layer_name, bit_config, 8)
+        act_bit = get_bit_width(f'{layer_name}_act', bit_config, 8)
+
+        quant_mod = Quant_Linear(weight_bit=weight_bit, full_precision_flag=full_precision_flag)
+        quant_mod.set_param(model)
+        return quant_mod
+
+    # If the model is an activation function (ReLU, PReLU, etc.)
+    elif isinstance(model, (nn.ReLU, nn.PReLU)):
+        layer_name = 'quant_act'  # Map to 'quant_act' for activations
+        act_bit = get_bit_width(layer_name, bit_config, 8)
+        return nn.Sequential(model, QuantAct(activation_bit=act_bit, full_precision_flag=full_precision_flag))
+
+    # For special activation layers such as PreLU
+    elif isinstance(model, nn.PReLU):
+        layer_name = 'quant_act'  # Map 'quant_act' to PReLU
+        act_bit = get_bit_width(layer_name, bit_config, 8)
+        return nn.Sequential(model, QuantActPreLu(activation_bit=act_bit, full_precision_flag=full_precision_flag))
+
+    # Recursively apply quantization to layers in nn.Sequential (e.g., blocks, networks)
+    elif isinstance(model, nn.Sequential):
+        mods = OrderedDict()
+        for n, m in model.named_children():
+            mods[n] = quantize_model_mix(m, bit_config, full_precision_flag)
+        return nn.Sequential(mods)
+
+    # Handle other layers (e.g., IBasicBlock, etc.)
+    else:
+        q_model = copy.deepcopy(model)
+        for attr in dir(model):
+            mod = getattr(model, attr)
+            if isinstance(mod, nn.Module) and 'norm' not in attr:  # Skip normalization layers
+                setattr(q_model, attr, quantize_model_mix(mod, bit_config, full_precision_flag))
+        return q_model
 
 if __name__ == "__main__":
     for net_name in __all__:
